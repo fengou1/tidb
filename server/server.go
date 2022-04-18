@@ -57,6 +57,7 @@ import (
 	"github.com/pingcap/tidb/parser/mysql"
 	"github.com/pingcap/tidb/parser/terror"
 	"github.com/pingcap/tidb/plugin"
+	"github.com/pingcap/tidb/session"
 	"github.com/pingcap/tidb/session/txninfo"
 	"github.com/pingcap/tidb/sessionctx/variable"
 	"github.com/pingcap/tidb/util"
@@ -132,6 +133,9 @@ type Server struct {
 	statusServer   *http.Server
 	grpcServer     *grpc.Server
 	inShutdownMode bool
+
+	sessionMapMutex  sync.Mutex
+	internalSessions map[interface{}]struct{}
 }
 
 // ConnectionCount gets current connection count.
@@ -163,10 +167,7 @@ func (s *Server) SetDomain(dom *domain.Domain) {
 
 // InitGlobalConnID initialize global connection id.
 func (s *Server) InitGlobalConnID(serverIDGetter func() uint64) {
-	s.globalConnID = util.GlobalConnID{
-		ServerIDGetter: serverIDGetter,
-		Is64bits:       true,
-	}
+	s.globalConnID = util.NewGlobalConnIDWithGetter(serverIDGetter, true)
 }
 
 // newConn creates a new *clientConn from a net.Conn.
@@ -193,7 +194,8 @@ func NewServer(cfg *config.Config, driver IDriver) (*Server, error) {
 		driver:            driver,
 		concurrentLimiter: NewTokenLimiter(cfg.TokenLimit),
 		clients:           make(map[uint64]*clientConn),
-		globalConnID:      util.GlobalConnID{ServerID: 0, Is64bits: true},
+		globalConnID:      util.NewGlobalConnID(0, true),
+		internalSessions:  make(map[interface{}]struct{}, 100),
 	}
 	s.capability = defaultCapability
 	setTxnScope()
@@ -619,13 +621,23 @@ func (s *Server) checkConnectionCount() error {
 
 // ShowProcessList implements the SessionManager interface.
 func (s *Server) ShowProcessList() map[uint64]*util.ProcessInfo {
+	rs := make(map[uint64]*util.ProcessInfo)
+	for connID, pi := range s.getUserProcessList() {
+		rs[connID] = pi
+	}
+	if s.dom != nil {
+		for connID, pi := range s.dom.SysProcTracker().GetSysProcessList() {
+			rs[connID] = pi
+		}
+	}
+	return rs
+}
+
+func (s *Server) getUserProcessList() map[uint64]*util.ProcessInfo {
 	s.rwlock.RLock()
 	defer s.rwlock.RUnlock()
-	rs := make(map[uint64]*util.ProcessInfo, len(s.clients))
+	rs := make(map[uint64]*util.ProcessInfo)
 	for _, client := range s.clients {
-		if atomic.LoadInt32(&client.status) == connStatusWaitShutdown {
-			continue
-		}
 		if pi := client.ctx.ShowProcess(); pi != nil {
 			rs[pi.ID] = pi
 		}
@@ -668,7 +680,8 @@ func (s *Server) Kill(connectionID uint64, query bool) {
 	s.rwlock.RLock()
 	defer s.rwlock.RUnlock()
 	conn, ok := s.clients[connectionID]
-	if !ok {
+	if !ok && s.dom != nil {
+		s.dom.SysProcTracker().KillSysProcess(connectionID)
 		return
 	}
 
@@ -697,6 +710,11 @@ func killConn(conn *clientConn) {
 	conn.mu.RUnlock()
 	if cancelFunc != nil {
 		cancelFunc()
+	}
+	if conn.bufReadConn != nil {
+		if err := conn.bufReadConn.SetReadDeadline(time.Now()); err != nil {
+			logutil.BgLogger().Warn("error setting read deadline for kill.", zap.Error(err))
+		}
 	}
 }
 
@@ -782,6 +800,35 @@ func (s *Server) kickIdleConnection() {
 // ServerID implements SessionManager interface.
 func (s *Server) ServerID() uint64 {
 	return s.dom.ServerID()
+}
+
+// StoreInternalSession implements SessionManager interface.
+// @param addr	The address of a session.session struct variable
+func (s *Server) StoreInternalSession(se interface{}) {
+	s.sessionMapMutex.Lock()
+	s.internalSessions[se] = struct{}{}
+	s.sessionMapMutex.Unlock()
+}
+
+// DeleteInternalSession implements SessionManager interface.
+// @param addr	The address of a session.session struct variable
+func (s *Server) DeleteInternalSession(se interface{}) {
+	s.sessionMapMutex.Lock()
+	delete(s.internalSessions, se)
+	s.sessionMapMutex.Unlock()
+}
+
+// GetInternalSessionStartTSList implements SessionManager interface.
+func (s *Server) GetInternalSessionStartTSList() []uint64 {
+	s.sessionMapMutex.Lock()
+	defer s.sessionMapMutex.Unlock()
+	tsList := make([]uint64, 0, len(s.internalSessions))
+	for se := range s.internalSessions {
+		if ts := session.GetStartTSFromSession(se); ts != 0 {
+			tsList = append(tsList, ts)
+		}
+	}
+	return tsList
 }
 
 // setSysTimeZoneOnce is used for parallel run tests. When several servers are running,
