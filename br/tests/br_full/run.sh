@@ -46,6 +46,24 @@ if ps -q $pid ; then
     exit 1
 fi
 
+# backup full and let PD returns an error, to test whether we can gracefully stop.
+echo "backup with retryable error start..."
+export GO_FAILPOINTS="github.com/pingcap/tidb/br/pkg/backup/get-region-error=1*return(true)"
+run_br --pd $PD_ADDR backup full -s "local://$TEST_DIR/$DB-retryable" --log-file $BACKUP_LOG --concurrency 4 &
+retry_count=$(grep "retry it..." "${BACKUP_LOG}" | wc -l)
+
+# at least retry larger than 1 with max sleep time 3000
+if [ "$retry_count" -ne "1" ];then
+    echo "TEST: [$TEST_NAME] failed!"
+    exit 1
+fi
+
+export GO_FAILPOINTS=""
+sleep 15
+if ps -q $pid ; then
+    echo "After failed 15 seconds, BR doesn't gracefully shutdown..."
+    exit 1
+fi
 
 # backup full
 echo "backup with lz4 start..."
