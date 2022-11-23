@@ -52,15 +52,22 @@ func RunResolveKvData(c context.Context, g glue.Glue, cmdName string, cfg *Resto
 
 	// read the backup meta resolved ts and total tikvs from backup storage
 	var resolveTS uint64
-	_, externStorage, err := GetStorage(ctx, cfg.Config.Storage, &cfg.Config)
-	if err != nil {
-		return errors.Trace(err)
+	var numBackupStore int
+	if cfg.SkipAWS {
+		resolveTS = cfg.RestoreTS
+	} else {
+		_, externStorage, err := GetStorage(ctx, cfg.Config.Storage, &cfg.Config)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
+		resolveTS, numBackupStore, err = ReadBackupMetaData(ctx, externStorage)
+		if err != nil {
+			return errors.Trace(err)
+		}
+
 	}
 
-	resolveTS, numBackupStore, err := ReadBackupMetaData(ctx, externStorage)
-	if err != nil {
-		return errors.Trace(err)
-	}
 	summary.CollectUint("resolve-ts", resolveTS)
 
 	keepaliveCfg := GetKeepalive(&cfg.Config)
@@ -116,12 +123,15 @@ func RunResolveKvData(c context.Context, g glue.Glue, cmdName string, cfg *Resto
 			if err != nil {
 				return errors.Trace(err)
 			}
-			numOnlineStore := len(allStores)
-			// in this version, it suppose to have the same number of tikvs between backup cluster and restore cluster
-			if numOnlineStore != numBackupStore {
-				log.Warn("the restore meta contains the number of tikvs inconsist with the resore cluster, retry ...", zap.Int("current stores", len(allStores)), zap.Int("backup stores", numBackupStore))
-				return errors.Annotatef(berrors.ErrRestoreTotalKVMismatch,
-					"number of tikvs mismatch")
+
+			if !cfg.SkipAWS {
+				numOnlineStore := len(allStores)
+				// in this version, it suppose to have the same number of tikvs between backup cluster and restore cluster
+				if numOnlineStore != numBackupStore {
+					log.Warn("the restore meta contains the number of tikvs inconsist with the resore cluster, retry ...", zap.Int("current stores", len(allStores)), zap.Int("backup stores", numBackupStore))
+					return errors.Annotatef(berrors.ErrRestoreTotalKVMismatch,
+						"number of tikvs mismatch")
+				}
 			}
 			return nil
 		},
