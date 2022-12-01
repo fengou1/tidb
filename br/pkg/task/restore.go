@@ -180,6 +180,7 @@ type RestoreConfig struct {
 	VolumeIOPS          int64                 `json:"volume-iops" toml:"volume-iops"`
 	VolumeThroughput    int64                 `json:"volume-throughput" toml:"volume-throughput"`
 	ProgressFile        string                `json:"progress-file" toml:"progress-file"`
+	ResolvedTs          uint64                `json:"resolved-ts" toml:"resolved-ts"`
 }
 
 // DefineRestoreFlags defines common flags for the restore tidb command.
@@ -306,6 +307,10 @@ func (cfg *RestoreConfig) ParseFromFlags(flags *pflag.FlagSet) error {
 			return errors.Trace(err)
 		}
 		if cfg.VolumeThroughput, err = flags.GetInt64(flagVolumeThroughput); err != nil {
+			return errors.Trace(err)
+		}
+
+		if cfg.ResolvedTs, err = flags.GetUint64(flagResolvedTs); err != nil {
 			return errors.Trace(err)
 		}
 

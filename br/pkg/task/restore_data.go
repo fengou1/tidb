@@ -54,7 +54,7 @@ func RunResolveKvData(c context.Context, g glue.Glue, cmdName string, cfg *Resto
 	var resolveTS uint64
 	var numBackupStore int
 	if cfg.SkipAWS {
-		resolveTS = cfg.RestoreTS
+		resolveTS = cfg.ResolvedTs
 	} else {
 		_, externStorage, err := GetStorage(ctx, cfg.Config.Storage, &cfg.Config)
 		if err != nil {
